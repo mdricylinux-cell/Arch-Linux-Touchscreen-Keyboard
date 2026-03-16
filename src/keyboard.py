@@ -1,16 +1,14 @@
 import sys
 import subprocess
+import os
 from PyQt6.QtWidgets import QApplication, QWidget, QPushButton, QGridLayout
 from PyQt6.QtCore import Qt
+import json
 
-# Full layout with special keys
-layout_keys = [
-    ['1','2','3','4','5','6','7','8','9','0','Backspace'],
-    ['Tab','q','w','e','r','t','y','u','i','o','p'],
-    ['Caps','a','s','d','f','g','h','j','k','l','Enter'],
-    ['Shift','z','x','c','v','b','n','m','Shift'],
-    ['Space']
-]
+# Load layout from JSON
+LAYOUT_FILE = os.path.join(os.path.dirname(__file__), "../layouts/default.json")
+with open(LAYOUT_FILE) as f:
+    layout = json.load(f)
 
 class Keyboard(QWidget):
 
@@ -18,44 +16,16 @@ class Keyboard(QWidget):
         super().__init__()
         self.shift = False
         self.caps = False
+        self.symbols = False
         self.init_ui()
 
     def init_ui(self):
-        grid = QGridLayout()
-        grid.setSpacing(5)
+        self.grid = QGridLayout()
+        self.grid.setSpacing(5)
+        self.setLayout(self.grid)
 
-        # Loop over each row
-        for row_idx, row in enumerate(layout_keys):
-
-            # Calculate "weight" for centering row
-            total_weight = sum([6 if k=="Space" else 2 if k in ["Shift","Backspace","Enter","Caps","Tab"] else 1 for k in row])
-            col_idx = 0
-
-            for key in row:
-                btn = QPushButton(key)
-                btn.setMinimumHeight(70)
-                btn.setStyleSheet("""
-                    font-size:18px;
-                    border-radius:8px;
-                    padding:10px;
-                """)
-
-                # assign width based on key type
-                if key == "Space":
-                    width = 6
-                elif key in ["Shift","Backspace","Enter","Caps","Tab"]:
-                    width = 2
-                else:
-                    width = 1
-
-                # Center row by adding empty columns before it
-                start_col = (12 - total_weight) // 2
-                grid.addWidget(btn, row_idx, col_idx + start_col, 1, width)
-
-                btn.clicked.connect(lambda _, k=key: self.key_press(k))
-                col_idx += width
-
-        self.setLayout(grid)
+        self.rows = []
+        self.build_keyboard()
         self.setWindowTitle("Touchboard")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         self.resize(1000,350)
@@ -63,12 +33,71 @@ class Keyboard(QWidget):
             QWidget { background:#202020; }
             QPushButton { font-size:18px; border-radius:8px; padding:10px; }
             QPushButton:pressed { background:#444; }
+            QPushButton.active { background:#555; }
         """)
 
-    def key_press(self,key):
-        # Handle special keys first
-        if key == "Space":
-            subprocess.run(["xdotool","key","space"])
+    def build_keyboard(self):
+        self.clear_grid()
+        self.buttons = []
+
+        # Top row: numbers or symbols
+        top_keys = layout["symbols"] if self.symbols else layout["numbers"]
+        self.add_row(top_keys + ["Backspace"], 0)
+
+        # Letter rows
+        for i, letter_row in enumerate(layout["letters"]):
+            row_keys = letter_row.copy()
+            if i == 0:
+                row_keys = ["Tab"] + row_keys
+            elif i == 1:
+                row_keys = ["Caps"] + row_keys + ["Enter"]
+            elif i == 2:
+                row_keys = ["Shift"] + row_keys + ["Shift"]
+            self.add_row(row_keys, i+1)
+
+        # Space row
+        self.add_row(["Space"], 4)
+
+    def clear_grid(self):
+        # Remove previous buttons
+        for i in reversed(range(self.grid.count())):
+            self.grid.itemAt(i).widget().setParent(None)
+
+    def add_row(self, keys, row):
+        col = 0
+        total_weight = sum([6 if k=="Space" else 2 if k in ["Shift","Backspace","Enter","Caps","Tab"] else 1 for k in keys])
+        start_col = (12 - total_weight)//2
+
+        for k in keys:
+            btn = QPushButton(k)
+            btn.setMinimumHeight(70)
+            width = 1
+            if k == "Space": width = 6
+            elif k in ["Shift","Backspace","Enter","Caps","Tab"]: width = 2
+
+            btn.clicked.connect(lambda _, key=k: self.key_press(key))
+            self.grid.addWidget(btn, row, col + start_col, 1, width)
+            self.buttons.append(btn)
+            col += width
+
+        self.update_shift_caps_visual()
+
+    def update_shift_caps_visual(self):
+        for btn in self.buttons:
+            if btn.text() == "Shift":
+                btn.setStyleSheet("background:#555;" if self.shift else "")
+            elif btn.text() == "Caps":
+                btn.setStyleSheet("background:#555;" if self.caps else "")
+
+    def key_press(self, key):
+        # Toggle layers
+        if key == "Shift":
+            self.shift = not self.shift
+            self.update_shift_caps_visual()
+            return
+        if key == "Caps":
+            self.caps = not self.caps
+            self.update_shift_caps_visual()
             return
         if key == "Backspace":
             subprocess.run(["xdotool","key","BackSpace"])
@@ -79,26 +108,31 @@ class Keyboard(QWidget):
         if key == "Tab":
             subprocess.run(["xdotool","key","Tab"])
             return
-        if key == "Shift":
-            self.shift = not self.shift
-            return
-        if key == "Caps":
-            self.caps = not self.caps
+        if key == "Space":
+            subprocess.run(["xdotool","key","space"])
             return
 
-        # Letters / numbers
-        if len(key) == 1:
-            char = key
-            if self.shift ^ self.caps:
-                char = char.upper()
-            subprocess.run(["xdotool","type",char])
-            if self.shift:
-                self.shift = False  # Shift only applies once
+        # Determine character
+        char = key
+        if len(char) == 1:  # letters/numbers
+            if char.isalpha():
+                if self.shift ^ self.caps:
+                    char = char.upper()
+                else:
+                    char = char.lower()
+                if self.shift:
+                    self.shift = False
+                    self.update_shift_caps_visual()
+            elif self.shift:
+                # Shift + symbol = toggle to symbol layer
+                self.symbols = not self.symbols
+                self.build_keyboard()
+        subprocess.run(["xdotool","type",char])
 
 def main():
     app = QApplication(sys.argv)
-    keyboard = Keyboard()
-    keyboard.show()
+    kb = Keyboard()
+    kb.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
